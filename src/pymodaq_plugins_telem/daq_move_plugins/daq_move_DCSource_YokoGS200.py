@@ -12,6 +12,7 @@ from pymodaq.utils.parameter import Parameter
 from pymeasure.adapters import VISAAdapter, PrologixAdapter
 
 import pyvisa
+
 from pymeasure.instruments.yokogawa import YokogawaGS200
 
 rm = pyvisa.ResourceManager()
@@ -19,7 +20,6 @@ VISA_RESOURCES = rm.list_resources()
 ADAPTERS = dict(VISA=VISAAdapter, Prologix=PrologixAdapter)
 
 VRANGE = {"30V": 30, "10V": 10, "1V": 1, "0.1V": .1,  "0.01V": .01}
-
 IRANGE = {"0.2 A": .2, "0.1V": .1, "0.01V": .01, ".001V": .001}
 
 class DAQ_Move_DCSource_YokoGS200(DAQ_Move_base):
@@ -29,27 +29,12 @@ class DAQ_Move_DCSource_YokoGS200(DAQ_Move_base):
     _axis_names = [ 'voltage','current']
     data_actuator_type = DataActuatorType.DataActuator
 
-
-    """Plugin for the Template Instrument
-
-    This object inherits all functionality to communicate with PyMoDAQ Module through inheritance via DAQ_Move_base
-    It then implements the particular communication with the instrument
-
-    Attributes:
-    -----------
-    controller: object
-        The particular object that allow the communication with the hardware, in general a python wrapper around the
-         hardware library
-
-    """
     params = [
-                 {'title': 'Adapter', 'name': 'adapter', 'type': 'list',
-                  'limits': list(ADAPTERS.keys())},
-                 {'title': 'VISA Address:', 'name': 'address', 'type': 'list',
-                  'limits': VISA_RESOURCES},
-                 {'title': 'Output:', 'name': 'output', 'type': 'led_push', 'value': False},
+                 {'title': 'Adapter', 'name': 'adapter', 'type': 'list','limits': list(ADAPTERS.keys())},
+                 {'title': 'VISA Address:', 'name': 'address', 'type': 'list','limits': VISA_RESOURCES},
+                 {'title': 'Output', 'name': 'output', 'type': 'bool','value': False},
                  {'title': 'Voltage Range:', 'name': 'voltage_range', 'type': 'list', 'limits': list(VRANGE.keys())},
-                 {'title': 'Current Range:', 'name': 'current_range', 'type': 'list', 'limits': list(IRANGE.keys())},
+                 {'title': 'Current Range:', 'name': 'current_range', 'type': 'list', 'limits': list(IRANGE.keys())}
              ] + comon_parameters_fun(is_multiaxes, axis_names=_axis_names, epsilon=_epsilon)
 
     def ini_attributes(self) -> None:
@@ -90,16 +75,13 @@ class DAQ_Move_DCSource_YokoGS200(DAQ_Move_base):
 
         if param.name() == "voltage_range":
             if self.controller.source_mode == 'VOLT':
-                #print(VRANGE[param.value()])
                 self.controller.source_range = VRANGE[param.value()]
 
         if param.name() == "current_range":
             if self.controller.source_mode == 'CURR':
-                #print(VRANGE[param.value()])
                 self.controller.source_range = IRANGE[param.value()]
 
         if param.name() == "axis":
-            print(param.value())
             self.controller.source_mode = param.value()
 
     def ini_stage(self, controller: object = None) -> Tuple[str, bool]:
