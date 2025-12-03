@@ -1,22 +1,75 @@
-from typing import List
-#from time import perf_counter
-#from qtpy.QtCore import QThread
-import numpy as np
-#from pymodaq.utils.daq_utils import ThreadCommand
-from pymodaq.utils.data import DataFromPlugins, DataToExport
-from pymodaq.control_modules.viewer_utility_classes import DAQ_Viewer_base, comon_parameters, main
-from pymodaq.utils.parameter import Parameter
-
-from pymeasure.instruments.agilent.agilent34450A import Agilent34450A
-from pymeasure.adapters import VISAAdapter, PrologixAdapter
-from pyvisa import ResourceManager
+from typing import Tuple
 
 import pyvisa
+import numpy as np
 
-CHANNELS = {'voltage', 'ac voltage', 'current', 'ac current', 'resistance', '4w resistance'}
+from pymeasure.adapters import VISAAdapter, PrologixAdapter
+
+from pymodaq.control_modules.viewer_utility_classes import (
+    DAQ_Viewer_base,
+    comon_parameters,
+    main
+)
+from pymodaq.utils.parameter import Parameter, utils
+from pymodaq.utils.data import DataFromPlugins, DataToExport
+
+from pyqtgraph.parametertree.Parameter import registerParameterType
+from pyqtgraph.parametertree.parameterTypes.basetypes import GroupParameter
+
+from pymodaq_plugins_telem.hardware.agilent_34A_thread_safe import Agilent34AThreadSafe
+CHANNELS = ['voltage', 'voltage_ac', 'current', 'current_ac', 'resistance', 'resistance_4w']
+MODE_MAP = {
+    "voltage": "voltage",
+    "voltage_ac": "ac voltage",
+    "current": "current",
+    "current_ac": "ac current",
+    "resistance": "resistance",
+    "resistance_4w": "4w resistance",
+}
 rm = pyvisa.ResourceManager()
 VISA_RESOURCES = rm.list_resources()
 ADAPTERS = dict(VISA=VISAAdapter, Prologix=PrologixAdapter)
+
+
+for channel in CHANNELS:
+    assert hasattr(Agilent34AThreadSafe, channel)
+
+class ChannelGroup(GroupParameter):
+    """Group Parameter listing the different output
+    """
+
+    def __init__(self, **opts) -> None:
+        opts['type'] = 'agilent34Achannel'
+        opts['addText'] = "Add Channel"
+        super().__init__(**opts)
+
+    def addNew(self) -> None:
+        """Add new channel to viewer
+        """
+        name_prefix = 'Agilent34ACh'
+
+        child_indexes = [int(par.name()[len(name_prefix) + 1:])
+                         for par in self.children()]
+
+        if child_indexes == []:
+            newindex = 0
+        else:
+            newindex = max(child_indexes) + 1
+
+        child = {
+            'title': f'Measure {newindex:02.0f}',
+            'name': f'{name_prefix}{newindex:02.0f}',
+            'type': 'itemselect',
+            'removable': True,
+            # FIX → selected must be a list, NOT a string
+            'value': dict(all_items=CHANNELS, selected=[CHANNELS[0]])
+        }
+
+        self.addChild(child)
+
+
+registerParameterType('agilent34Achannel', ChannelGroup, override=True)
+
 
 class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
     """ Instrument plugin class for a OD viewer.
@@ -38,7 +91,7 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
                  {'title': 'VISA Address:', 'name': 'address', 'type': 'list',
                   'limits': VISA_RESOURCES},
                  {'title': 'ID:', 'name': 'id', 'type': 'str'},
-                 {'title': 'Channels:', 'name': 'channels', 'type': 'list', 'limits' : CHANNELS }
+                 {'title': 'Channels:', 'name': 'channels', 'type': 'agilent34Achannel'}
              ] + comon_parameters + [
                 {'title': 'Configuration:', 'name': 'config', 'type': 'group', 'children': [
                 {'title': 'Reset:', 'name': 'reset', 'type': 'bool_push', 'value': False},
@@ -49,7 +102,7 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
     ]
 
     def ini_attributes(self):
-        self.controller: Agilent34450A = None
+        self.controller: Agilent34AThreadSafe = None
 
     def commit_settings(self, param: Parameter):
         """Apply the consequences of a change of value in the detector settings
@@ -67,29 +120,43 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
             self.controller.save_setup(self.settings['config', 'setup_number'])
             param.setValue(False)
 
-        elif param.name() == 'channels':
+        elif param.name() in utils.iter_children(
+
+                self.settings.child('channels'), []):
+
             data = []
+
             for child in self.settings.child('channels').children():
                 labels = child.value()['selected']
+
                 data.append(
+
                     DataFromPlugins(
+
                         name=child.name(),
+
                         data=[np.array([0]) for _ in labels],
+
                         labels=labels,
+
                         dim='Data0D'
+
                     )
+
                 )
+
             self.dte_signal_temp.emit(DataToExport(
-                name="Agilent34ASerie",
+
+                name="agilent34A",
+
                 data=data
+
             ))
 
         elif param.name() == 'reset':
             self.controller.reset()
             param.setValue(False)
 
-        elif param.name() == 'mode':
-            self.controller.mode = param.value()
 
     def ini_detector(self, controller=None):
         """Detector communication initialization
@@ -113,14 +180,14 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
             adapter = ADAPTERS[self.settings.child('adapter').value()](
                 self.settings.child('address').value()
             )
-            self.controller = Agilent34450A(adapter)
+            self.controller = Agilent34AThreadSafe(adapter)
 
         self.dte_signal_temp.emit(
             DataToExport(
-                name="Agilent34ASerie",
+                name="agilent34A",
                 data=[
                     DataFromPlugins(
-                        name="Agilent34ASerie",
+                        name="agilent34A",
                         data=[np.array([0])],
                         dim="Data0D",
                         labels=["x"]
@@ -145,20 +212,34 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
             self.controller.shutdown()
 
     def grab_data(self, Naverage=1, **kwargs):
-        """Start a grab from the detector
+        data = []
 
-        Parameters
-        ----------
-        Naverage: int
-            Number of hardware averaging (if hardware averaging is possible, self.hardware_averaging should be set to
-            True in class preamble and you should code this implementation)
-        kwargs: dict
-            others optionals arguments
-        """
-        data_tot = self.controller.voltage
-        self.dte_signal.emit(DataToExport(name='Agilent34401A',
-                                          data=[DataFromPlugins(name='Agilent34401A', data=data_tot,
-                                                                dim='Data0D', labels=['data0'])]))
+        for child in self.settings.child('channels').children():
+            labels = child.value()['selected'][:]
+
+            subdata = []
+
+            for label in labels:
+                mode = MODE_MAP[label]
+
+                # Only change mode if it is different
+                if getattr(self.controller, "mode") != mode:
+                    self.controller.mode = mode
+
+                value = getattr(self.controller, label)  # thread-safe wrapper
+                subdata.append(np.array([value]))
+
+            data.append(DataFromPlugins(
+                name=child.name(),
+                data=subdata,
+                labels=labels,
+                dim='Data0D'
+            ))
+
+        self.dte_signal.emit(DataToExport(
+            name="agilent34A",
+            data=data
+        ))
 
     def stop(self):
         """Stop the current grab hardware wise if necessary"""
