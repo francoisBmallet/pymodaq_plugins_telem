@@ -1,6 +1,7 @@
 from typing import Tuple
 
 import pyvisa
+import time
 import numpy as np
 
 from pymeasure.adapters import VISAAdapter, PrologixAdapter
@@ -116,11 +117,32 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
 
         # ✅ UPDATE UNIT WHEN CHANNEL CHANGES
         elif param.name() == 'channel':
+
             label = self.settings['channel']
-            unit = UNIT_MAP.get(label, "")
+            unit = UNIT_MAP[label]
+
+            # ✅ Update unit display
             self.settings.child('unit').setValue(unit)
 
-            # Update temp data structure
+            # ✅ SET MODE HERE (ONCE, SAFELY)
+            mode = MODE_MAP[label]
+            try:
+                if self.controller is not None:
+                    self.controller.mode = mode
+                    time.sleep(2)
+                    try:
+                        self.controller.adapter.connection.clear()  # flush VISA buffer
+                    except Exception:
+                        pass
+            except Exception as e:
+                self.emit_status(
+                    ThreadCommand(
+                        'Update_Status',
+                        [f"Mode change failed: {e}", "log"]
+                    )
+                )
+
+            # ✅ Update temporary data structure for PyMoDAQ
             self.dte_signal_temp.emit(
                 DataToExport(
                     name="agilent34A",
@@ -128,13 +150,12 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
                         DataFromPlugins(
                             name="agilent34A",
                             data=[np.array([0])],
-                            labels=[label],
+                            labels=[f"{label} ({unit})"],
                             dim="Data0D"
                         )
                     ]
                 )
             )
-
 
     # -------------------------------------------------------------------------
     # INITIALIZATION
@@ -185,13 +206,8 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
     def grab_data(self, Naverage=1, **kwargs):
 
         label = self.settings['channel']
-        mode = MODE_MAP[label]
-
-        # ✅ SAFE MODE SWITCHING
-        if self.controller.mode != mode:
-            self.controller.mode = mode
-
-        value = getattr(self.controller, label)
+        unit = UNIT_MAP[label]
+        value=self.controller.voltage
 
         self.dte_signal.emit(
             DataToExport(
@@ -200,13 +216,12 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
                     DataFromPlugins(
                         name="agilent34A",
                         data=[np.array([value])],
-                        labels=[label],
+                        labels=[f"{label} ({unit})"],
                         dim="Data0D"
                     )
                 ]
             )
         )
-
 
     # -------------------------------------------------------------------------
     # STOP
