@@ -52,23 +52,19 @@ class DAQ_Move_DCSource_Yoko7651(DAQ_Move_base):
         -------
         float: The position obtained after scaling conversion.
         """
-        if self.axis_value == 'voltage':  # Amp axis
+        if self.axis_value == 'voltage':  # voltage axis
             val = DataActuator(data=self.controller.source_voltage)
-        elif self.axis_value == 'current':  # Frequency axis
+        elif self.axis_value == 'current':  # current axis
             val = DataActuator(data=self.controller.source_current)
         val = self.get_position_with_scaling(val)
         return val
-        val = DataActuator(data=self.controller.source_level)
-        val = self.get_position_with_scaling(val)
-        return val
-
 
     def close(self) -> None:
         """Terminate the communication protocol"""
         ## TODO for your custom plugin
         #raise NotImplemented  # when writing your own plugin remove this line
         #  self.controller.your_method_to_terminate_the_communication()  # when writing your own plugin replace this line
-        #self.controller.shutdown()
+        self.controller.shutdown()
 
     def commit_settings(self, param: Parameter) -> None:
         """Apply the consequences of a change of value in the detector settings
