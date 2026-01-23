@@ -14,7 +14,7 @@ from pymodaq.control_modules.viewer_utility_classes import (
 from pymodaq.utils.parameter import Parameter
 from pymodaq.utils.data import DataFromPlugins, DataToExport
 
-from pymodaq_plugins_telem.hardware.agilent_34A_thread_safe import Agilent34AThreadSafe
+from pymodaq_plugins_telem.hardware.agilent_34A_thread_safe import Agilent34athreadsafe
 
 
 # -----------------------------------------------------------------------------
@@ -94,7 +94,7 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
     # -------------------------------------------------------------------------
 
     def ini_attributes(self):
-        self.controller: Agilent34AThreadSafe = None
+        self.controller: Agilent34athreadsafe = None
 
 
     # -------------------------------------------------------------------------
@@ -169,7 +169,7 @@ class DAQ_0DViewer_Multi_Agilent34ASerie(DAQ_Viewer_base):
             adapter = ADAPTERS[self.settings['adapter']](
                 self.settings['address']
             )
-            self.controller = Agilent34AThreadSafe(adapter)
+            self.controller = Agilent34athreadsafe(adapter)
 
         # Initialize unit display
         label = self.settings['channel']

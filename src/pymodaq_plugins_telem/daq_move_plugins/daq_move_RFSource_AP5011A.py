@@ -12,7 +12,8 @@ from pymodaq.utils.parameter import Parameter
 
 from pymeasure.adapters import VISAAdapter, PrologixAdapter
 import pyvisa
-from pymeasure.instruments.anapico import APSIN12G
+from pymodaq_plugins_telem.hardware.anapico_AP5011A import AP5011A
+
 
 
 # ----------------------------
@@ -44,9 +45,9 @@ class DAQ_Move_RFSource_AP5011A(DAQ_Move_base):
     # ✅ HARD LIMITS (ENFORCED)
     # =============================
     FREQ_MIN_GHZ = 0.1      # 100 MHz
-    FREQ_MAX_GHZ = 12.0     # 12 GHz
+    FREQ_MAX_GHZ = 20.0     # 20.0 GHz
     POW_MIN_W = 1e-9        # -90 dBm
-    POW_MAX_W = 0.1         # +20 dBm
+    POW_MAX_W = 0.316        # +25 dBm
 
     params = [
         {'title': 'Adapter', 'name': 'adapter', 'type': 'list',
@@ -67,16 +68,25 @@ class DAQ_Move_RFSource_AP5011A(DAQ_Move_base):
     # INIT ATTRIBUTES
     # =============================
     def ini_attributes(self) -> None:
-        self.controller: APSIN12G | None = None
+        self.controller: AP5011A | None = None
 
     # =============================
     # ✅ READ POSITION (GHz, W)
     # =============================
     def get_actuator_value(self) -> DataActuator:
+        """
+        Returns the current actuator value for the selected axis.
+        Always returns a numeric value (float) suitable for 2D scans.
+        Axis 'Freq' → GHz
+        Axis 'Pow'  → W
+        """
 
         if self.axis_value == 'Freq':
             # Hardware gives Hz → convert to GHz
-            freq_hz = self.controller.frequency
+            try:
+                freq_hz = float(self.controller.frequency)
+            except Exception:
+                freq_hz = 0.0  # fallback if reading fails
             freq_ghz = freq_hz * 1e-9
 
             val = DataActuator(data=freq_ghz)
@@ -85,12 +95,26 @@ class DAQ_Move_RFSource_AP5011A(DAQ_Move_base):
 
         elif self.axis_value == 'Pow':
             # Hardware gives dBm → convert to W
-            val_dbm = self.controller.power
+            try:
+                val_dbm = self.controller.power
+
+                # Convert string to float if necessary
+                if isinstance(val_dbm, str):
+                    val_dbm = float(val_dbm.replace('dBm', '').strip())
+
+            except Exception:
+                val_dbm = -90.0  # fallback if reading fails
+
+            # Convert dBm → W
             val_w = 10 ** (val_dbm / 10) * 1e-3
 
             val = DataActuator(data=val_w)
             val = self.get_position_with_scaling(val)
             return val
+
+        else:
+            # Unknown axis → return 0 safely
+            return DataActuator(data=0.0)
 
     # =============================
     # ✅ CLOSE
@@ -122,7 +146,7 @@ class DAQ_Move_RFSource_AP5011A(DAQ_Move_base):
                 self.settings.child('adapter').value()
             ](self.settings.child('address').value())
 
-            self.controller = APSIN12G(adapter)
+            self.controller = AP5011A(adapter)
 
         try:
             info = self.controller.id

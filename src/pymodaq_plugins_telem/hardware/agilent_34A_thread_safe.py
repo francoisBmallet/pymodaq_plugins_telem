@@ -7,7 +7,7 @@ from pymodaq.utils.logger import set_logger, get_module_name
 lock = Lock()
 logger = set_logger(get_module_name(__file__), add_to_console=False)
 
-class Agilent34AThreadSafe(Agilent34450A):
+class Agilent34athreadsafe(Agilent34450A):
 
     def read(self, **kwargs):
         value = None
@@ -29,3 +29,5 @@ class Agilent34AThreadSafe(Agilent34450A):
             logger.debug(str(e))
         finally:
             lock.release()
+
+
