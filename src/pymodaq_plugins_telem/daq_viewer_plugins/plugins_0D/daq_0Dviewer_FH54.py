@@ -6,7 +6,13 @@ Protocol (RS232, 8N1, 4800/9600/19200 baud, no handshake):
     - Write: "#COMMAND VALUE\r"    e.g. b"#MODE 1\r"
     - Reply terminates with "\r\n".
     - ?MEAS returns e.g. "123 mT" (value + space + unit).
-      Units returned : uT, mT, T, G, kG, A/m, kA/m ...
+      When the probe is saturated (over-range), the FH 54 replies with
+      the literal string "FULL" instead of a numeric value. This plugin
+      converts such replies to NaN so a scan is not interrupted.
+    - #RANGE n (n = 1..7) selects a fixed range:
+          1 = 30 µT  2 = 300 µT  3 = 3 mT
+          4 = 30 mT  5 = 300 mT  6 = 3 T   7 = 30 T
+    - #AUTO 0/1 toggles auto-ranging.
 
 Tested target :
     - Magnet-Physik FH 54 Gauss-/Teslameter with Hall probe, connected
@@ -47,6 +53,20 @@ UNIT_TO_TESLA = {
     "kA/m": 4 * np.pi * 1e-4,
 }
 
+# Fixed-range mapping as per the FH 54 manual (chapter 7)
+RANGE_MAP = {
+    "30 µT":  1,
+    "300 µT": 2,
+    "3 mT":   3,
+    "30 mT":  4,
+    "300 mT": 5,
+    "3 T":    6,
+    "30 T":   7,
+}
+
+# Reply tokens that mean "no valid measurement"
+INVALID_TOKENS = {"FULL", "OVER", "OVR", "----", "-----", "OFL"}
+
 MODE_MAP = {"DC": 0, "AC": 1}
 BAUDRATES = [4800, 9600, 19200]
 
@@ -79,7 +99,6 @@ class FH54Serial:
             timeout=timeout,
             write_timeout=timeout,
         )
-        # Flush anything left over from a previous session
         try:
             self.ser.reset_input_buffer()
             self.ser.reset_output_buffer()
@@ -93,7 +112,6 @@ class FH54Serial:
         self.ser.flush()
 
     def _read_line(self) -> str:
-        # read_until stops on the CR LF terminator
         line = self.ser.read_until(self.EOL_R)
         return line.decode("ascii", errors="ignore").strip()
 
@@ -103,10 +121,8 @@ class FH54Serial:
         return self._read_line()
 
     def write(self, cmd: str, value=None) -> str:
-        """Send #CMD [VALUE] and return the (usually empty / OK) reply."""
         payload = f"#{cmd}" if value is None else f"#{cmd} {value}"
         self._write(payload)
-        # Some setters do not reply — a short read is enough
         try:
             return self._read_line()
         except Exception:
@@ -121,6 +137,10 @@ class FH54Serial:
     def set_autorange(self, on: bool) -> None:
         self.write("AUTO", 1 if on else 0)
 
+    def set_range(self, range_label: str) -> None:
+        """Set a fixed range using the RANGE_MAP labels."""
+        self.write("RANGE", RANGE_MAP[range_label])
+
     def zero(self) -> None:
         self.write("ZERO", 1)
 
@@ -129,13 +149,17 @@ class FH54Serial:
         return self.query("MODE")
 
     def measure_tesla(self) -> Tuple[float, str]:
-        """Return (field_in_Tesla, raw_reply)."""
+        """Return (field_in_Tesla_or_NaN, raw_reply).
+
+        NaN is returned when the instrument reports an over-range
+        condition ('FULL', 'OVER', ...) or when the reply cannot be
+        parsed. This keeps ongoing scans alive.
+        """
         raw = self.query("MEAS")
         return _parse_field_to_tesla(raw), raw
 
     def close(self) -> None:
         try:
-            # Return to front-panel control
             self.write("LOCAL")
         except Exception:
             pass
@@ -146,27 +170,47 @@ class FH54Serial:
 
 
 def _parse_field_to_tesla(reply: str) -> float:
-    """Parse a FH 54 reply like '123 mT' or '-0.045 T' into Tesla."""
+    """Parse a FH 54 reply into Tesla.
+
+    Returns NaN for empty replies, over-range tokens ('FULL', 'OVER'...)
+    or any unparseable reply. Never raises.
+    """
     if not reply:
-        raise ValueError("Empty reply from FH 54")
+        return float("nan")
+
+    txt = reply.strip()
+    upper = txt.upper()
+
+    # Over-range / invalid tokens returned by the instrument
+    for tok in INVALID_TOKENS:
+        if tok in upper:
+            return float("nan")
 
     # Some firmwares echo the command name, e.g. "MEAS 123 mT" — drop it
-    txt = reply.strip()
-    if txt.upper().startswith("MEAS"):
+    if upper.startswith("MEAS"):
         txt = txt[4:].strip()
 
-    # Normalise decimal separator (FH 54 usually uses '.', keep it safe)
+    # Normalise decimal separator
     txt = txt.replace(",", ".")
     parts = txt.split()
+    if not parts:
+        return float("nan")
+
+    try:
+        value = float(parts[0])
+    except ValueError:
+        return float("nan")
+
     if len(parts) < 2:
         # Value without unit — assume Tesla
-        return float(parts[0])
+        return value
 
-    value = float(parts[0])
     unit = parts[1]
-    if unit not in UNIT_TO_TESLA:
-        raise ValueError(f"Unknown FH 54 unit: {unit!r} (reply={reply!r})")
-    return value * UNIT_TO_TESLA[unit]
+    factor = UNIT_TO_TESLA.get(unit)
+    if factor is None:
+        # Unknown unit -> treat as invalid rather than crashing
+        return float("nan")
+    return value * factor
 
 
 # -----------------------------------------------------------------------------
@@ -178,6 +222,9 @@ class DAQ_0DViewer_FH54(DAQ_Viewer_base):
 
     Reads a single magnetic-field value (AC RMS or DC) via ?MEAS and returns
     it in Tesla, whatever the display unit selected on the instrument.
+
+    Over-range replies ('FULL', 'OVER', ...) are converted to NaN so a scan
+    is never interrupted by a saturated point.
     """
 
     params = comon_parameters + [
@@ -190,8 +237,15 @@ class DAQ_0DViewer_FH54(DAQ_Viewer_base):
 
         {"title": "Measurement mode:", "name": "mode", "type": "list",
          "limits": list(MODE_MAP.keys()), "value": "DC"},
-        {"title": "Autorange:", "name": "autorange", "type": "bool",
-         "value": True},
+
+        # ---- Range group -------------------------------------------------
+        {"title": "Range:", "name": "range_group", "type": "group",
+         "children": [
+             {"title": "Autorange:", "name": "autorange", "type": "bool",
+              "value": False},
+             {"title": "Fixed range:", "name": "fixed_range", "type": "list",
+              "limits": list(RANGE_MAP.keys()), "value": "300 mT"},
+         ]},
 
         {"title": "Zero (DC):", "name": "zero", "type": "bool_push",
          "value": False},
@@ -221,7 +275,20 @@ class DAQ_0DViewer_FH54(DAQ_Viewer_base):
                     "Update_Status", [f"FH54: mode set to {param.value()}"]))
 
             elif param.name() == "autorange":
-                self.controller.set_autorange(bool(param.value()))
+                on = bool(param.value())
+                self.controller.set_autorange(on)
+                # When autorange is turned off, re-apply the currently
+                # selected fixed range so the instrument settles on it
+                if not on:
+                    self.controller.set_range(
+                        self.settings["range_group", "fixed_range"])
+
+            elif param.name() == "fixed_range":
+                # Only apply if autorange is off
+                if not bool(self.settings["range_group", "autorange"]):
+                    self.controller.set_range(param.value())
+                    self.emit_status(ThreadCommand(
+                        "Update_Status", [f"FH54: range set to {param.value()}"]))
 
             elif param.name() == "zero":
                 self.controller.zero()
@@ -248,7 +315,11 @@ class DAQ_0DViewer_FH54(DAQ_Viewer_base):
             )
             # Push initial configuration to the instrument
             self.controller.set_mode(self.settings["mode"])
-            self.controller.set_autorange(bool(self.settings["autorange"]))
+            autorange = bool(self.settings["range_group", "autorange"])
+            self.controller.set_autorange(autorange)
+            if not autorange:
+                self.controller.set_range(
+                    self.settings["range_group", "fixed_range"])
 
         # Initialise the plot with an empty value in Tesla
         self.dte_signal_temp.emit(
@@ -283,12 +354,19 @@ class DAQ_0DViewer_FH54(DAQ_Viewer_base):
                 for _ in range(int(Naverage)):
                     v, _raw = self.controller.measure_tesla()
                     vals.append(v)
-                value = float(np.mean(vals))
+                # nanmean tolerates individual FULL points in the average
+                value = float(np.nanmean(vals))
                 raw = f"mean of {Naverage} samples"
             else:
                 value, raw = self.controller.measure_tesla()
 
             self.settings.child("last_raw").setValue(raw)
+
+            # Log FULL / over-range as a warning without breaking the scan
+            if not np.isfinite(value):
+                self.emit_status(ThreadCommand(
+                    "Update_Status",
+                    [f"FH54: invalid/over-range reply '{raw}' -> NaN", "log"]))
 
         except Exception as e:
             self.emit_status(ThreadCommand(
