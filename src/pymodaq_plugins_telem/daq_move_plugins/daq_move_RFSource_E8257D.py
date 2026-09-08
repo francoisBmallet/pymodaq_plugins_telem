@@ -1,9 +1,9 @@
 from typing import Tuple
 import math
+import time
 
 from pymodaq.control_modules.move_utility_classes import (
     DAQ_Move_base,
-    DataActuator,
     DataActuatorType,
     comon_parameters_fun,
     main
@@ -16,9 +16,6 @@ import pyvisa
 from pymeasure.instruments.agilent import Agilent8257D
 
 
-# =============================
-# VISA SETUP
-# =============================
 rm = pyvisa.ResourceManager()
 VISA_RESOURCES = rm.list_resources()
 ADAPTERS = dict(VISA=VISAAdapter, Prologix=PrologixAdapter)
@@ -29,26 +26,24 @@ class DAQ_Move_RFSource_E8257D(DAQ_Move_base):
     PyMoDAQ 5 plugin for Agilent / Keysight E8257D
 
     Axis 0: Frequency (GHz)
-    Axis 1: Power (mW)
+    Axis 1: Power (W)
     """
 
-    # =============================
-    # ✅ FORCED USER UNITS
-    # =============================
-    _controller_units = ['GHz', 'mW']
+    _controller_units = ['GHz', 'W']
     _axis_names = ['Freq', 'Pow']
     is_multiaxes = True
-    data_actuator_type = DataActuatorType.DataActuator
+
+    data_actuator_type = DataActuatorType.float
     _epsilon = 1e-12
 
-    # =============================
-    # ✅ HARD LIMITS
-    # =============================
-    FREQ_MIN_GHZ = 0.1      # 100 MHz
-    FREQ_MAX_GHZ = 20.0     # 20 GHz (adjust if needed)
+    FREQ_MIN_GHZ = 0.1
+    FREQ_MAX_GHZ = 20.0
 
-    POW_MIN_MW = 1e-6       # -60 dBm
-    POW_MAX_MW = 100.0      # +20 dBm
+    POW_MIN_DBM = -60.0
+    POW_MAX_DBM = 18.0
+
+    POW_MIN_W = 1e-9
+    POW_MAX_W = 0.064
 
     params = [
         {'title': 'Adapter', 'name': 'adapter', 'type': 'list',
@@ -58,72 +53,45 @@ class DAQ_Move_RFSource_E8257D(DAQ_Move_base):
          'limits': VISA_RESOURCES},
 
         {'title': 'Output', 'name': 'output', 'type': 'bool',
-         'value': False}
+         'value': False},
     ] + comon_parameters_fun(
         is_multiaxes,
         axis_names=_axis_names,
         epsilon=_epsilon
     )
 
-    # =============================
-    # INIT ATTRIBUTES
-    # =============================
     def ini_attributes(self) -> None:
         self.controller: Agilent8257D | None = None
+        self._cached_freq = self.FREQ_MIN_GHZ
+        self._cached_pow = self.POW_MIN_W
 
-    # =============================
-    # ✅ READ POSITION (GHz, mW)
-    # =============================
-    def get_actuator_value(self) -> DataActuator:
-
+    def get_actuator_value(self):
+        """
+        IMPORTANT:
+        Do NOT query the instrument continuously (polling) during scans.
+        Only return cached values.
+        """
         if self.axis_value == 'Freq':
-            # Hardware → Hz → GHz
-            freq_hz = self.controller.frequency
-            freq_ghz = freq_hz * 1e-9
-
-            val = DataActuator(data=freq_ghz)
-            val = self.get_position_with_scaling(val)
-            return val
-
+            return self._cached_freq
         elif self.axis_value == 'Pow':
-            # Hardware → dBm → mW
-            pow_dbm = self.controller.power
-            pow_mw = 10 ** (pow_dbm / 10)
+            return self._cached_pow
+        return 0.0
 
-            val = DataActuator(data=pow_mw)
-            val = self.get_position_with_scaling(val)
-            return val
-
-    # =============================
-    # ✅ CLOSE
-    # =============================
     def close(self) -> None:
         if self.controller is not None:
             self.controller.shutdown()
 
-    # =============================
-    # ✅ OUTPUT ON/OFF
-    # =============================
     def commit_settings(self, param: Parameter) -> None:
-
         if param.name() == "output":
-            if param.value():
-                self.controller.enable()
-            else:
-                self.controller.disable()
+            self.controller.enable() if param.value() else self.controller.disable()
 
-    # =============================
-    # ✅ INITIALIZATION
-    # =============================
     def ini_stage(self, controller: object = None) -> Tuple[str, bool]:
-
         self.ini_stage_init(slave_controller=controller)
 
         if self.is_master:
             adapter = ADAPTERS[
                 self.settings.child('adapter').value()
             ](self.settings.child('address').value())
-
             self.controller = Agilent8257D(adapter)
 
         try:
@@ -135,61 +103,41 @@ class DAQ_Move_RFSource_E8257D(DAQ_Move_base):
 
         return info, initialized
 
-    # =============================
-    # ✅ ABSOLUTE MOVE (GHz, mW)
-    # =============================
-    def move_abs(self, val: DataActuator):
-
+    def move_abs(self, val: float):
         val = self.check_bound(val)
         val = self.set_position_with_scaling(val)
 
         if self.axis_value == 'Freq':
-            # GHz → Hz
-            freq_ghz = val.value()
-            freq_hz = freq_ghz * 1e9
-            self.controller.frequency = freq_hz
+            self.controller.frequency = val * 1e9
+            self._cached_freq = val
 
         elif self.axis_value == 'Pow':
-            # mW → dBm
-            pow_mw = val.value()
-            pow_dbm = 10 * math.log10(pow_mw)
+            pow_dbm = 10 * math.log10(val / 1e-3)
+            if pow_dbm < self.POW_MIN_DBM:
+                pow_dbm = self.POW_MIN_DBM
+            elif pow_dbm > self.POW_MAX_DBM:
+                pow_dbm = self.POW_MAX_DBM
+
             self.controller.power = pow_dbm
+            self._cached_pow = val
 
-        self.target_position = val
+        time.sleep(0.05)
+
         self.current_value = val
+        self.target_position = val
 
-    # =============================
-    # ✅ RELATIVE MOVE
-    # =============================
-    def move_rel(self, val: DataActuator) -> None:
+    def move_rel(self, val: float) -> None:
+        self.move_abs(self.current_value + val)
 
-        val = self.check_bound(self.current_value + val) - self.current_value
-        self.target_value = val + self.current_value
-
-        val = self.set_position_relative_with_scaling(val)
-        self.move_abs(self.target_value)
-
-    # =============================
-    # ✅ HOME
-    # =============================
     def move_home(self):
-
         if self.axis_value == 'Freq':
-            self.move_abs(DataActuator(self.FREQ_MIN_GHZ))
-
+            self.move_abs(self.FREQ_MIN_GHZ)
         elif self.axis_value == 'Pow':
-            self.move_abs(DataActuator(self.POW_MIN_MW))
+            self.move_abs(self.POW_MIN_W)
 
-    # =============================
-    # ✅ STOP
-    # =============================
     def stop_motion(self):
-        # Safest stop = RF OFF
         self.controller.disable()
 
 
-# =============================
-# ✅ STANDALONE MODE
-# =============================
 if __name__ == '__main__':
     main(__file__)
