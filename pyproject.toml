@@ -13,6 +13,7 @@ name = "pymodaq_plugins_telem" #todo modify template by your plugin short name
 description = 'telem instrument drivers'
 dependencies = [
     "pymodaq>=5.0.0",
+    "pyserial",
     #todo: list here all dependencies your package may have
 ]
 
